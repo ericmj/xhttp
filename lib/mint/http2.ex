@@ -149,6 +149,8 @@ defmodule Mint.HTTP2 do
   @connection_preface "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
   @transport_opts [alpn_advertised_protocols: ["h2"]]
 
+  @default_max_concurrent_streams 100
+
   @default_window_size 65_535
   @max_window_size 2_147_483_647
 
@@ -194,7 +196,7 @@ defmodule Mint.HTTP2 do
     # Settings that the server communicates to the client.
     server_settings: %{
       enable_push: true,
-      max_concurrent_streams: 100,
+      max_concurrent_streams: @default_max_concurrent_streams,
       initial_window_size: @default_window_size,
       max_frame_size: @default_max_frame_size,
       max_header_list_size: :infinity
@@ -202,7 +204,7 @@ defmodule Mint.HTTP2 do
 
     # Settings that the client communicates to the server.
     client_settings: %{
-      max_concurrent_streams: 100,
+      max_concurrent_streams: @default_max_concurrent_streams,
       max_frame_size: @default_max_frame_size,
       enable_push: true
     },
@@ -981,14 +983,6 @@ defmodule Mint.HTTP2 do
          client_settings = settings(stream_id: 0, params: client_settings_params),
          preface = [@connection_preface, Frame.encode(client_settings)],
          :ok <- transport.send(socket, preface),
-         conn = update_in(conn.client_settings_queue, &:queue.in(client_settings_params, &1)),
-         {:ok, server_settings, buffer, socket} <- receive_server_settings(transport, socket),
-         server_settings_ack =
-           settings(stream_id: 0, params: [], flags: set_flags(:settings, [:ack])),
-         :ok <- transport.send(socket, Frame.encode(server_settings_ack)),
-         conn = put_in(conn.buffer, buffer),
-         conn = put_in(conn.socket, socket),
-         conn = apply_server_settings(conn, settings(server_settings, :params)),
          :ok <- if(mode == :active, do: transport.setopts(socket, active: :once), else: :ok) do
       {:ok, conn}
     else
@@ -1655,13 +1649,30 @@ defmodule Mint.HTTP2 do
 
   # SETTINGS
 
+  # TODO LRB
+  # conn = update_in(conn.client_settings_queue, &:queue.in(client_settings_params, &1)),
+  # {:ok, server_settings, buffer, socket} <- receive_server_settings(transport, socket),
+  # server_settings_ack =
+  #   settings(stream_id: 0, params: [], flags: set_flags(:settings, [:ack])),
+  # :ok <- transport.send(socket, Frame.encode(server_settings_ack)),
+  # conn = put_in(conn.buffer, buffer),
+  # conn = put_in(conn.socket, socket),
+  # conn = apply_server_settings(conn, settings(server_settings, :params)),
+  #
   defp handle_settings(conn, frame, responses) do
     settings(flags: flags, params: params) = frame
 
     if flag_set?(flags, :settings, :ack) do
-      {{:value, params}, conn} = get_and_update_in(conn.client_settings_queue, &:queue.out/1)
-      conn = apply_client_settings(conn, params)
-      {conn, responses}
+      case get_and_update_in(conn.client_settings_queue, &:queue.out/1) do
+        {:empty, conn} ->
+          {:ok, server_settings, buffer, socket} = receive_server_settings(conn.transport, conn.socket)
+          conn = put_in(conn.buffer, buffer)
+          conn = put_in(conn.socket, socket)
+          handle_settings(conn, server_settings, responses)
+        {{:value, params}, conn} ->
+          conn = apply_client_settings(conn, params)
+          {conn, responses}
+      end
     else
       conn = apply_server_settings(conn, params)
       frame = settings(flags: set_flags(:settings, [:ack]), params: [])
