@@ -983,6 +983,7 @@ defmodule Mint.HTTP2 do
          client_settings = settings(stream_id: 0, params: client_settings_params),
          preface = [@connection_preface, Frame.encode(client_settings)],
          :ok <- transport.send(socket, preface),
+         conn = update_in(conn.client_settings_queue, &:queue.in(client_settings_params, &1)),
          :ok <- if(mode == :active, do: transport.setopts(socket, active: :once), else: :ok) do
       {:ok, conn}
     else
@@ -1650,7 +1651,6 @@ defmodule Mint.HTTP2 do
   # SETTINGS
 
   # TODO LRB
-  # conn = update_in(conn.client_settings_queue, &:queue.in(client_settings_params, &1)),
   # {:ok, server_settings, buffer, socket} <- receive_server_settings(transport, socket),
   # server_settings_ack =
   #   settings(stream_id: 0, params: [], flags: set_flags(:settings, [:ack])),
@@ -1660,6 +1660,7 @@ defmodule Mint.HTTP2 do
   # conn = apply_server_settings(conn, settings(server_settings, :params)),
   #
   defp handle_settings(conn, frame, responses) do
+    IO.puts(:stderr, "@@@@@@@@ handle_settings frame: #{inspect(frame)}")
     settings(flags: flags, params: params) = frame
 
     if flag_set?(flags, :settings, :ack) do
